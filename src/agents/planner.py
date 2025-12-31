@@ -1,12 +1,29 @@
 from src.agents.agent_state import AgentState
 from src.agents.planner_types import AgentPlan, AgentAction
-
-# LLM-based planner (primary)
 from src.agents.llm_planner import build_plan_llm
 
-
-# Feature flag: keep for safety & testing
 USE_LLM_PLANNER = True
+
+
+def _is_explicitly_casual(user_query: str) -> bool:
+    """
+    Minimal, dataset-agnostic check for conversational intent.
+    This is intentionally conservative.
+    """
+    casual_markers = [
+    "let's start over",
+    "start a new conversation",
+    "new topic",
+    "change the topic",
+    "forget previous context",
+    "ignore previous messages",
+    "let's talk about something else",
+    "just chatting",
+    "random question",
+]
+
+    q = user_query.lower().strip()
+    return any(q.startswith(m) or q == m for m in casual_markers)
 
 
 def build_plan(
@@ -17,19 +34,15 @@ def build_plan(
     """
     Core planner entry point.
 
-    Design goals:
-    - Dataset agnostic
-    - Enterprise-chat generic
-    - LLM-driven
-    - Safe against hallucination
+    Principles:
+    - Retrieval-first grounding
+    - LLM advisory planning
+    - Explicit safety constraints
+    - Dataset-agnostic behavior
     """
 
     # ------------------------------------------------------------------
     # 🔒 HARD RAG SAFETY INVARIANT (FOUNDATIONAL)
-    # ------------------------------------------------------------------
-    # If NO retrieval has ever happened in this session,
-    # we MUST retrieve before answering — regardless of what
-    # the LLM planner thinks.
     # ------------------------------------------------------------------
     if not agent_state.last_retrieved_chunks:
         return AgentPlan([
@@ -41,21 +54,39 @@ def build_plan(
         ])
 
     # ------------------------------------------------------------------
-    # 🧠 LLM PLANNER (PRIMARY AFTER FIRST GROUNDING)
+    # 🧠 LLM PLANNER (ADVISORY)
     # ------------------------------------------------------------------
     if USE_LLM_PLANNER:
         plan = build_plan_llm(
             user_query=user_query,
             agent_state=agent_state,
-            chat_history=chat_history
+            chat_history=chat_history,
+            intent_metadata=getattr(
+                agent_state, "last_intent_metadata", None
+            )
         )
 
-        # Safety net: never allow empty or malformed plans
         if plan and plan.actions:
+            # ----------------------------------------------------------
+            # 🔒 PHASE 2.4 CONSTRAINT:
+            # No ungrounded chat once documents exist
+            # ----------------------------------------------------------
+            contains_chat = any(
+                a.type == "chat" for a in plan.actions
+            )
+
+            if contains_chat and not _is_explicitly_casual(user_query):
+                return AgentPlan([
+                    AgentAction(
+                        type="respond",
+                        reason="Grounded response enforced (post-retrieval)"
+                    )
+                ])
+
             return plan
 
     # ------------------------------------------------------------------
-    # 🛟 FINAL DETERMINISTIC FALLBACK
+    # 🛟 FINAL SAFETY FALLBACK
     # ------------------------------------------------------------------
     return AgentPlan([
         AgentAction(

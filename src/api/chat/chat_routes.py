@@ -39,6 +39,7 @@ def chat_message(request: ChatRequest, user=Depends(get_current_user)):
     agent_state = session_store.get_agent_state(user_id, session_id)
     chat_history = session_store.get_session(user_id, session_id)
 
+    # === STATE SNAPSHOT (START) ===
     log_event(
         "state.before_turn",
         {
@@ -47,10 +48,14 @@ def chat_message(request: ChatRequest, user=Depends(get_current_user)):
             "last_retrieved_chunks_present": bool(
                 agent_state.last_retrieved_chunks
             ),
-            "history_length": len(chat_history)
+            "num_last_chunks": len(
+                agent_state.last_retrieved_chunks or []
+            ),
+            "history_length": len(chat_history),
         }
     )
 
+    # === USER MESSAGE ===
     log_event(
         "chat.request",
         {
@@ -93,6 +98,23 @@ def chat_message(request: ChatRequest, user=Depends(get_current_user)):
         }
     )
 
+    # ==========================================================
+    # 🧭 PLANNER OBSERVABILITY — INPUTS
+    # ==========================================================
+    log_event(
+        "planner.input",
+        {
+            "user_message": request.message,
+            "has_prior_context": bool(agent_state.last_retrieved_chunks),
+            "num_prior_chunks": len(
+                agent_state.last_retrieved_chunks or []
+            ),
+            "history_length": len(chat_history),
+            "intent_metadata": agent_state.last_intent_metadata,
+            "answer_mode": agent_state.last_answer_mode,
+        }
+    )
+
     # === PLANNING ===
     plan = build_plan(
         user_query=request.message,
@@ -110,9 +132,28 @@ def chat_message(request: ChatRequest, user=Depends(get_current_user)):
         }
     )
 
+    # ==========================================================
+    # 🔒 PLANNER SAFETY OVERRIDE VISIBILITY
+    # ==========================================================
+    if (
+        not agent_state.last_retrieved_chunks
+        and any(a.type == "respond" for a in plan.actions)
+    ):
+        log_event(
+            "planner.override",
+            {
+                "reason": "RAG safety invariant: respond without retrieval blocked",
+                "original_plan": [
+                    {"type": a.type, "reason": a.reason}
+                    for a in plan.actions
+                ]
+            }
+        )
+
     chunks = []
     assistant_text = ""
 
+    # === EXECUTION ===
     for step_index, action in enumerate(plan.actions):
         log_event(
             "agent.action.start",
@@ -169,6 +210,7 @@ def chat_message(request: ChatRequest, user=Depends(get_current_user)):
             }
         )
 
+    # === STORE RESPONSE ===
     session_store.append_message(
         user_id,
         session_id,

@@ -1,6 +1,26 @@
 from src.agents.answer_modes import AnswerMode
 
 
+def _instruction_for_answer_mode(answer_mode: AnswerMode) -> str:
+    return {
+        AnswerMode.QA: (
+            "Provide a direct, factual answer to the user's question."
+        ),
+        AnswerMode.LIST: (
+            "List the relevant documents or items clearly and explicitly."
+        ),
+        AnswerMode.EXPAND: (
+            "Expand and explain the requested item in detail."
+        ),
+        AnswerMode.SUMMARY: (
+            "Provide a concise, high-level summary."
+        ),
+    }.get(
+        answer_mode,
+        "Provide a helpful answer based on the documentation."
+    )
+
+
 def build_grounded_prompt(
     user_query: str,
     retrieved_chunks: list,
@@ -17,32 +37,10 @@ def build_grounded_prompt(
         for m in chat_history[-6:]
     )
 
-    if answer_mode == AnswerMode.QA:
-        instruction = (
-            "Answer the user's question concisely using the documentation."
-        )
-
-    elif answer_mode == AnswerMode.LIST:
-        instruction = (
-            "List the relevant documents or items found in the documentation."
-        )
-
-    elif answer_mode == AnswerMode.EXPAND:
-        instruction = (
-            "Explain the relevant document or section in detail. "
-            "Structure the explanation clearly."
-        )
-
-    elif answer_mode == AnswerMode.SUMMARY:
-        instruction = (
-            "Provide a high-level summary of the documentation."
-        )
-
-    else:
-        instruction = "Answer using the documentation."
+    mode_instruction = _instruction_for_answer_mode(answer_mode)
 
     return f"""
-You are an assistant answering based on provided documentation.
+You are an enterprise assistant answering strictly from documentation.
 
 Conversation so far:
 {history}
@@ -51,13 +49,14 @@ Documentation:
 {context}
 
 Instruction:
-{instruction}
+{mode_instruction}
+Do NOT invent information. If the answer is missing, say so clearly.
 
 User question:
 {user_query}
 
 Answer:
-"""
+""".strip()
 
 
 def build_chat_prompt(
@@ -79,4 +78,4 @@ User:
 {user_query}
 
 Assistant:
-"""
+""".strip()
