@@ -1,0 +1,43 @@
+# .gitignore for a Python project
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.env/
+.env
+
+# Compiled Python files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Distribution / packaging
+.Python
+build/
+dist/
+wheels/
+*.egg-info/
+*.egg
+
+# Source code management
+# Useful if you use a specific VCS inside your project
+.svn
+CVS
+.hg
+
+# Editors and IDEs
+.idea/  # PyCharm/IntelliJ
+.vscode/ # VS Code
+*.swp   # vim
+
+# Operating System files
+.DS_Store # macOS
+Thumbs.db # Windows
+
+data/
+*.npy
+*.pkl
+*.index
