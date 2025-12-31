@@ -4,7 +4,8 @@ from typing import Literal, List, Optional
 ActionType = Literal[
     "retrieve",
     "respond",
-    "chat"
+    "chat",
+    "clarify"
 ]
 
 @dataclass

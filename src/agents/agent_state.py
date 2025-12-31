@@ -13,3 +13,7 @@ class AgentState:
 
     # Cached retrieval results (last successful retrieval only)
     last_retrieved_chunks: Optional[List[dict]] = None
+
+    # LLM-derived intent metadata (non-blocking)
+    last_intent_metadata: Optional[dict] = None
+

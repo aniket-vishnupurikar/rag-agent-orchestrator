@@ -1,7 +1,11 @@
+from src.agents.answer_modes import AnswerMode
+
+
 def build_grounded_prompt(
     user_query: str,
     retrieved_chunks: list,
-    chat_history: list
+    chat_history: list,
+    answer_mode: AnswerMode
 ) -> str:
     context = "\n\n".join(
         f"[{i+1}] {c['text']}"
@@ -13,8 +17,32 @@ def build_grounded_prompt(
         for m in chat_history[-6:]
     )
 
+    if answer_mode == AnswerMode.QA:
+        instruction = (
+            "Answer the user's question concisely using the documentation."
+        )
+
+    elif answer_mode == AnswerMode.LIST:
+        instruction = (
+            "List the relevant documents or items found in the documentation."
+        )
+
+    elif answer_mode == AnswerMode.EXPAND:
+        instruction = (
+            "Explain the relevant document or section in detail. "
+            "Structure the explanation clearly."
+        )
+
+    elif answer_mode == AnswerMode.SUMMARY:
+        instruction = (
+            "Provide a high-level summary of the documentation."
+        )
+
+    else:
+        instruction = "Answer using the documentation."
+
     return f"""
-You are an assistant answering questions based on provided documentation.
+You are an assistant answering based on provided documentation.
 
 Conversation so far:
 {history}
@@ -22,12 +50,15 @@ Conversation so far:
 Documentation:
 {context}
 
+Instruction:
+{instruction}
+
 User question:
 {user_query}
 
-Answer using the documentation. If the documentation does not contain the answer,
-state that clearly.
+Answer:
 """
+
 
 def build_chat_prompt(
     user_query: str,

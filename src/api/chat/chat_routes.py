@@ -15,6 +15,10 @@ from src.llm.prompt_builder import (
     build_chat_prompt
 )
 
+# 🧠 LLM metadata
+from src.agents.llm_intent_classifier import classify_intent_llm
+from src.agents.llm_answer_mode_classifier import classify_answer_mode_llm
+
 # === Observability ===
 from src.observability.logger import log_event
 from src.observability.timer import timed_block
@@ -28,14 +32,10 @@ llm_client = OpenAICompatibleClient()
 
 
 @router.post("/chat/message", response_model=ChatResponse)
-def chat_message(
-    request: ChatRequest,
-    user=Depends(get_current_user)
-):
+def chat_message(request: ChatRequest, user=Depends(get_current_user)):
     user_id = user.user_id
     session_id = request.session_id
 
-    # === LOAD STATE ===
     agent_state = session_store.get_agent_state(user_id, session_id)
     chat_history = session_store.get_session(user_id, session_id)
 
@@ -47,14 +47,10 @@ def chat_message(
             "last_retrieved_chunks_present": bool(
                 agent_state.last_retrieved_chunks
             ),
-            "num_last_chunks": len(
-                agent_state.last_retrieved_chunks or []
-            ),
             "history_length": len(chat_history)
         }
     )
 
-    # === USER MESSAGE ===
     log_event(
         "chat.request",
         {
@@ -68,6 +64,33 @@ def chat_message(
         user_id,
         session_id,
         ChatMessage(role="user", content=request.message)
+    )
+
+    # === LLM METADATA (NON-BLOCKING) ===
+    intent_metadata = classify_intent_llm(
+        user_query=request.message,
+        chat_history=chat_history,
+        agent_state=agent_state
+    )
+
+    answer_mode = classify_answer_mode_llm(
+        user_query=request.message,
+        chat_history=chat_history
+    )
+
+    session_store.update_agent_state(
+        user_id,
+        session_id,
+        last_intent_metadata=intent_metadata,
+        last_answer_mode=answer_mode.value
+    )
+
+    log_event(
+        "agent.metadata",
+        {
+            "intent": intent_metadata,
+            "answer_mode": answer_mode.value
+        }
     )
 
     # === PLANNING ===
@@ -90,7 +113,6 @@ def chat_message(
     chunks = []
     assistant_text = ""
 
-    # === EXECUTION ===
     for step_index, action in enumerate(plan.actions):
         log_event(
             "agent.action.start",
@@ -103,14 +125,6 @@ def chat_message(
 
         if action.type == "retrieve":
             retrieval_input = build_retrieval_request(request.message)
-
-            log_event(
-                "retrieval.start",
-                {
-                    "query": retrieval_input.query,
-                    "top_k": retrieval_input.top_k
-                }
-            )
 
             with timed_block("retrieval.call"):
                 chunks = retrieval_client.retrieve(
@@ -125,45 +139,20 @@ def chat_message(
                 last_retrieved_chunks=chunks
             )
 
-            log_event(
-                "retrieval.complete",
-                {
-                    "num_chunks": len(chunks),
-                    "doc_ids": list(
-                        {c.get("doc_id") for c in chunks}
-                    )
-                }
-            )
-
         elif action.type == "respond":
             context = chunks or agent_state.last_retrieved_chunks or []
-
-            log_event(
-                "respond.context",
-                {
-                    "using_cached_context": not bool(chunks),
-                    "num_chunks": len(context),
-                    "history_length": len(chat_history)
-                }
-            )
 
             prompt = build_grounded_prompt(
                 user_query=request.message,
                 retrieved_chunks=context,
-                chat_history=chat_history
+                chat_history=chat_history,
+                answer_mode=answer_mode
             )
 
             with timed_block("llm.generate"):
                 assistant_text = llm_client.generate(prompt)
 
         elif action.type == "chat":
-            log_event(
-                "chat.mode",
-                {
-                    "history_length": len(chat_history)
-                }
-            )
-
             prompt = build_chat_prompt(
                 user_query=request.message,
                 chat_history=chat_history
@@ -180,7 +169,6 @@ def chat_message(
             }
         )
 
-    # === STORE RESPONSE ===
     session_store.append_message(
         user_id,
         session_id,
@@ -188,26 +176,11 @@ def chat_message(
     )
 
     log_event(
-        "chat.response",
-        {
-            "user_id": user_id,
-            "session_id": session_id,
-            "response_length": len(assistant_text)
-        }
-    )
-
-    # === STATE SNAPSHOT (END OF TURN) ===
-    log_event(
         "state.after_turn",
         {
             "user_id": user_id,
             "session_id": session_id,
-            "last_retrieved_chunks_present": bool(
-                agent_state.last_retrieved_chunks
-            ),
-            "num_last_chunks": len(
-                agent_state.last_retrieved_chunks or []
-            ),
+            "last_answer_mode": answer_mode.value,
             "history_length": len(
                 session_store.get_session(user_id, session_id)
             )
