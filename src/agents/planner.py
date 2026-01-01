@@ -2,6 +2,9 @@ from src.agents.agent_state import AgentState
 from src.agents.planner_types import AgentPlan, AgentAction
 from src.agents.llm_planner import build_plan_llm
 
+# 🆕 Context relevance judge
+from src.agents.llm_context_relevance import judge_context_relevance_llm
+
 USE_LLM_PLANNER = True
 
 
@@ -11,16 +14,16 @@ def _is_explicitly_casual(user_query: str) -> bool:
     This is intentionally conservative.
     """
     casual_markers = [
-    "let's start over",
-    "start a new conversation",
-    "new topic",
-    "change the topic",
-    "forget previous context",
-    "ignore previous messages",
-    "let's talk about something else",
-    "just chatting",
-    "random question",
-]
+        "let's start over",
+        "start a new conversation",
+        "new topic",
+        "change the topic",
+        "forget previous context",
+        "ignore previous messages",
+        "let's talk about something else",
+        "just chatting",
+        "random question",
+    ]
 
     q = user_query.lower().strip()
     return any(q.startswith(m) or q == m for m in casual_markers)
@@ -49,6 +52,24 @@ def build_plan(
             AgentAction(
                 type="retrieve",
                 reason="Initial grounding required"
+            ),
+            AgentAction(type="respond")
+        ])
+
+    # ------------------------------------------------------------------
+    # 🧠 CONTEXT RELEVANCE RESET (FOUNDATIONAL)
+    # ------------------------------------------------------------------
+    relevance_decision = judge_context_relevance_llm(
+        user_query=user_query,
+        retrieved_chunks=agent_state.last_retrieved_chunks,
+        chat_history=chat_history,
+    )
+
+    if relevance_decision == "retrieve":
+        return AgentPlan([
+            AgentAction(
+                type="retrieve",
+                reason="Existing context not relevant to new question"
             ),
             AgentAction(type="respond")
         ])

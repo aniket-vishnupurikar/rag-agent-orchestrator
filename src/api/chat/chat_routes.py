@@ -1,3 +1,4 @@
+# src/api/chat/chat_routes.py
 from fastapi import APIRouter, Depends
 
 from src.api.dependancies import get_current_user
@@ -18,6 +19,13 @@ from src.llm.prompt_builder import (
 # 🧠 LLM metadata
 from src.agents.llm_intent_classifier import classify_intent_llm
 from src.agents.llm_answer_mode_classifier import classify_answer_mode_llm
+
+# 🆕 Citation validation
+from src.agents.citation_validator import validate_citations
+
+# 🆕 Context relevance judge (for observability only)
+from src.agents.llm_context_relevance import judge_context_relevance_llm
+from src.agents.llm_query_rewriter import rewrite_query_llm
 
 # === Observability ===
 from src.observability.logger import log_event
@@ -99,8 +107,16 @@ def chat_message(request: ChatRequest, user=Depends(get_current_user)):
     )
 
     # ==========================================================
-    # 🧭 PLANNER OBSERVABILITY — INPUTS
+    # 🧭 PLANNER INPUT OBSERVABILITY
     # ==========================================================
+    relevance_decision = None
+    if agent_state.last_retrieved_chunks:
+        relevance_decision = judge_context_relevance_llm(
+            user_query=request.message,
+            retrieved_chunks=agent_state.last_retrieved_chunks,
+            chat_history=chat_history
+        )
+
     log_event(
         "planner.input",
         {
@@ -112,6 +128,7 @@ def chat_message(request: ChatRequest, user=Depends(get_current_user)):
             "history_length": len(chat_history),
             "intent_metadata": agent_state.last_intent_metadata,
             "answer_mode": agent_state.last_answer_mode,
+            "context_relevance": relevance_decision,
         }
     )
 
@@ -132,28 +149,10 @@ def chat_message(request: ChatRequest, user=Depends(get_current_user)):
         }
     )
 
-    # ==========================================================
-    # 🔒 PLANNER SAFETY OVERRIDE VISIBILITY
-    # ==========================================================
-    if (
-        not agent_state.last_retrieved_chunks
-        and any(a.type == "respond" for a in plan.actions)
-    ):
-        log_event(
-            "planner.override",
-            {
-                "reason": "RAG safety invariant: respond without retrieval blocked",
-                "original_plan": [
-                    {"type": a.type, "reason": a.reason}
-                    for a in plan.actions
-                ]
-            }
-        )
-
     chunks = []
+    source_map = {}
     assistant_text = ""
 
-    # === EXECUTION ===
     for step_index, action in enumerate(plan.actions):
         log_event(
             "agent.action.start",
@@ -165,7 +164,9 @@ def chat_message(request: ChatRequest, user=Depends(get_current_user)):
         )
 
         if action.type == "retrieve":
-            retrieval_input = build_retrieval_request(request.message)
+            query = rewrite_query_llm(request.message, chat_history)
+            retrieval_input = build_retrieval_request(query)
+
 
             with timed_block("retrieval.call"):
                 chunks = retrieval_client.retrieve(
@@ -174,14 +175,37 @@ def chat_message(request: ChatRequest, user=Depends(get_current_user)):
                     jwt_token=user.raw_token
                 )
 
+            source_map = {
+                c["chunk_id"]: {
+                    "doc_id": c.get("doc_id"),
+                    "domain": c.get("domain")
+                }
+                for c in chunks
+                if c.get("chunk_id")
+            }
+
             session_store.update_agent_state(
                 user_id,
                 session_id,
-                last_retrieved_chunks=chunks
+                last_retrieved_chunks=chunks,
+                last_source_map=source_map
+            )
+
+            log_event(
+                "citation.context",
+                {
+                    "num_sources": len(source_map),
+                    "chunk_ids": list(source_map.keys())
+                }
             )
 
         elif action.type == "respond":
             context = chunks or agent_state.last_retrieved_chunks or []
+            source_map = (
+                source_map
+                or agent_state.last_source_map
+                or {}
+            )
 
             prompt = build_grounded_prompt(
                 user_query=request.message,
@@ -192,6 +216,16 @@ def chat_message(request: ChatRequest, user=Depends(get_current_user)):
 
             with timed_block("llm.generate"):
                 assistant_text = llm_client.generate(prompt)
+
+            diagnostics = validate_citations(
+                assistant_text,
+                source_map
+            )
+
+            log_event(
+                "citation.validation",
+                diagnostics
+            )
 
         elif action.type == "chat":
             prompt = build_chat_prompt(

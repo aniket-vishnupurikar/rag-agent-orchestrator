@@ -1,3 +1,4 @@
+# src/llm/prompt_builder.py
 from src.agents.answer_modes import AnswerMode
 
 
@@ -7,13 +8,13 @@ def _instruction_for_answer_mode(answer_mode: AnswerMode) -> str:
             "Provide a direct, factual answer to the user's question."
         ),
         AnswerMode.LIST: (
-            "List the relevant documents or items clearly and explicitly."
+            "List the relevant items clearly. Cite each item using the provided source IDs."
         ),
         AnswerMode.EXPAND: (
-            "Expand and explain the requested item in detail."
+            "Expand and explain the requested item in detail, citing sources."
         ),
         AnswerMode.SUMMARY: (
-            "Provide a concise, high-level summary."
+            "Provide a concise, high-level summary with citations where applicable."
         ),
     }.get(
         answer_mode,
@@ -27,14 +28,16 @@ def build_grounded_prompt(
     chat_history: list,
     answer_mode: AnswerMode
 ) -> str:
+    # 🔒 Dataset-agnostic citation: use chunk_id exactly
     context = "\n\n".join(
-        f"[{i+1}] {c['text']}"
-        for i, c in enumerate(retrieved_chunks)
+        f"[{c.get('chunk_id')}] {c.get('text')}"
+        for c in retrieved_chunks
+        if c.get("chunk_id") and c.get("text")
     )
 
     history = "\n".join(
         f"{m.role.upper()}: {m.content}"
-        for m in chat_history[-6:]
+        for m in chat_history[-8:]
     )
 
     mode_instruction = _instruction_for_answer_mode(answer_mode)
@@ -45,12 +48,14 @@ You are an enterprise assistant answering strictly from documentation.
 Conversation so far:
 {history}
 
-Documentation:
+Documentation (cite sources like [C03759]):
 {context}
 
 Instruction:
 {mode_instruction}
-Do NOT invent information. If the answer is missing, say so clearly.
+- Use ONLY the documentation above.
+- Cite sources using the bracketed IDs.
+- If information is missing, say so clearly.
 
 User question:
 {user_query}
